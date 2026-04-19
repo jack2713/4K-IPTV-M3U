@@ -333,9 +333,8 @@ def process_region(
         typ = tds.nth(2).inner_text().strip()
         if region_zh not in typ:
             continue
-        if "失效" in status:
-            continue
-        if ("新上线" in status) or ("可用" in status) or ("正常" in status):
+        # 仅选“新上线”状态（按用户要求）
+        if "新上线" in status:
             target_idx = i
             break
     if target_idx < 0:
@@ -378,30 +377,18 @@ def process_region(
             pairs = None
 
     if not pairs:
-        # blog 页面的频道列表通常已是可用链接；先保守探测，探测失败也保留链接用于落盘
+        # 取消 m3u8 可播校验：频道列表里有链接就直接落盘
         anchor_pairs = _extract_channel_pairs_from_html(html, BASE)
         if anchor_pairs:
-            _ = any(
-                _probe_m3u8(context, url, args.probe_timeout_ms)
-                for _, url in anchor_pairs[: args.test_top_n]
-            )
             pairs = anchor_pairs
 
     if not pairs:
         m3u8s = _collect_m3u8_hrefs(html, BASE)
-        tested: list[str] = []
-        for u in m3u8s[: args.test_top_n]:
-            if _probe_m3u8(context, u, args.probe_timeout_ms):
-                tested.append(u)
-                break
-        if not tested and m3u8s:
-            # 探测没命中时仍保留第一条，避免整省空跑无文件
+        if m3u8s:
             u = m3u8s[0]
-        elif not tested:
+        else:
             print(f"[skip] {region_zh}: no m3u8 links found", file=sys.stderr)
             return None
-        else:
-            u = tested[0]
         path = urlparse(u).path.split("/")[-1].split("?")[0] or "live"
         ch = path.replace(".m3u8", "") or "live"
         pairs = [(ch, u)]
