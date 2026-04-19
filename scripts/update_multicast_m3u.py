@@ -378,13 +378,14 @@ def process_region(
             pairs = None
 
     if not pairs:
+        # blog 页面的频道列表通常已是可用链接；先保守探测，探测失败也保留链接用于落盘
         anchor_pairs = _extract_channel_pairs_from_html(html, BASE)
         if anchor_pairs:
-            if any(
+            _ = any(
                 _probe_m3u8(context, url, args.probe_timeout_ms)
                 for _, url in anchor_pairs[: args.test_top_n]
-            ):
-                pairs = anchor_pairs
+            )
+            pairs = anchor_pairs
 
     if not pairs:
         m3u8s = _collect_m3u8_hrefs(html, BASE)
@@ -393,10 +394,14 @@ def process_region(
             if _probe_m3u8(context, u, args.probe_timeout_ms):
                 tested.append(u)
                 break
-        if not tested:
-            print(f"[skip] {region_zh}: no playable m3u8 in first {args.test_top_n}", file=sys.stderr)
+        if not tested and m3u8s:
+            # 探测没命中时仍保留第一条，避免整省空跑无文件
+            u = m3u8s[0]
+        elif not tested:
+            print(f"[skip] {region_zh}: no m3u8 links found", file=sys.stderr)
             return None
-        u = tested[0]
+        else:
+            u = tested[0]
         path = urlparse(u).path.split("/")[-1].split("?")[0] or "live"
         ch = path.replace(".m3u8", "") or "live"
         pairs = [(ch, u)]
@@ -473,15 +478,13 @@ def main() -> int:
                 if text:
                     path.write_text(text, encoding="utf-8")
                     print(f"[ok] {path.name} ({zh})")
-                    consecutive_fail = 0
-                else:
-                    consecutive_fail += 1
+                # “无数据/无可播链接”不计入风控失败，避免误中断
+                consecutive_fail = 0
                 time.sleep(0.25)
             except SiteBlockedError as e:
                 consecutive_fail += 1
                 print(f"[warn] blocked signal: {e}", file=sys.stderr)
             except Exception as e:
-                consecutive_fail += 1
                 print(f"[err] {zh}: {e}", file=sys.stderr)
             if consecutive_fail >= args.stop_on_consecutive_fail:
                 print(
