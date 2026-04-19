@@ -38,6 +38,7 @@ _CHROMIUM_ARGS = [
 
 _ALLOWED_HOSTS = {
     "blog.cqshushu.com",
+    "iptv.cqshushu.com",
     "cdnjs.cloudflare.com",
     "static.cloudflareinsights.com",
 }
@@ -301,6 +302,16 @@ def _ensure_multicast_list(page, args) -> bool:
     return True
 
 
+def _available_region_codes(page) -> set[str]:
+    vals: set[str] = set()
+    opts = page.locator('select[name="region"] option')
+    for i in range(opts.count()):
+        v = (opts.nth(i).get_attribute("value") or "").strip().lower()
+        if v:
+            vals.add(v)
+    return vals
+
+
 def _pick_row(rows: list[MulticastRow], region_zh: str) -> MulticastRow | None:
     if not rows:
         return None
@@ -336,7 +347,7 @@ def process_region(
         page.locator(".btn-search").click(timeout=5000)
     except Exception as e:
         print(f"[skip] {region_zh}: province select failed: {e!s}", file=sys.stderr)
-        raise SiteBlockedError(f"province select blocked: {region_zh}")
+        return None
     page.wait_for_timeout(500)
     try:
         page.wait_for_selector("table.hotel-iptv-table tbody tr", state="visible", timeout=10000)
@@ -364,13 +375,13 @@ def process_region(
         return None
 
     tr = tr_list.nth(target_idx)
-    ip_link = tr.locator("a.ip-link").first
-    ip_link.click(timeout=5000)
-    page.wait_for_timeout(700)
-    try:
-        page.wait_for_selector(".back-to-list, .view-channel-list", state="attached", timeout=6000)
-    except Exception:
-        pass
+    token = (tr.locator("a.ip-link").first.get_attribute("data-p") or "").strip()
+    if not token:
+        print(f"[skip] {region_zh}: missing token data-p", file=sys.stderr)
+        return None
+    detail_url = f"https://iptv.cqshushu.com/index.php?p={token}&t=multicast"
+    page.goto(detail_url, wait_until="domcontentloaded", timeout=args.timeout_ms)
+    page.wait_for_timeout(800)
     html = page.content()
 
     # 查看频道列表（blog 为同页 Ajax 切换）
@@ -486,12 +497,21 @@ def main() -> int:
             locale="zh-CN",
             viewport={"width": 1365, "height": 900},
             user_agent=ua,
+            accept_downloads=True,
         )
         context.add_init_script(_STEALTH_INIT)
         page = context.new_page()
         context.route("**/*", _route_filter)
+        if not _ensure_multicast_list(page, args):
+            print("[fatal] cannot open multicast list page", file=sys.stderr)
+            browser.close()
+            return 1
+        available_codes = _available_region_codes(page)
         consecutive_fail = 0
         for i, (code, zh, slug) in enumerate(regions):
+            if code not in available_codes:
+                print(f"[skip] {zh}: region code {code} not in page options", file=sys.stderr)
+                continue
             path = out_dir / f"{slug}4K.m3u"
             try:
                 text = process_region(
