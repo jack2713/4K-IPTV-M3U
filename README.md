@@ -13,13 +13,17 @@
 
 - `txt/*.txt`
 - `m3u/*.m3u`
+ 使用extract_rtp_group_channels.py 收集组播IP，生成：
 
+- `rtp/rtp/*.txt`
+  
 ## 本地运行
 
 1. 安装依赖：
    - `pip install -r requirements.txt`
 3. 运行：
    - `python rtp/b.py`
+   - `python extract_rtp_group_channels.py`
 
 如需本地一键提交并推送，可使用：
 
