@@ -95,14 +95,19 @@ def _parse_rows_from_html_fragment(fragment_html):
     rows = re.findall(r"<tr[^>]*>(.*?)</tr>", fragment_html, flags=re.IGNORECASE | re.DOTALL)
     result = []
     for row_html in rows:
-        ip_match = re.search(r"<a[^>]*>\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+)\s*</a>", row_html, flags=re.IGNORECASE)
+        ip_match = re.search(
+            r'<a[^>]*class="[^"]*ip-link[^"]*"[^>]*data-p="([^"]+)"[^>]*>\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+)\s*</a>',
+            row_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if not ip_match:
             continue
         tds = re.findall(r"<td[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
         if len(tds) < 6:
             continue
         result.append({
-            "host": ip_match.group(1).strip(),
+            "p_token": ip_match.group(1).strip(),
+            "host": ip_match.group(2).strip(),
             "type": _strip_html(tds[2]),
             "status": _strip_html(tds[5]),
         })
@@ -180,6 +185,103 @@ def get_region_assets(province, rows=None):
         return region_all, []
     return region_all, preferred
 
+def parse_s_token(detail_html: str) -> str | None:
+    m = re.search(r'data-s="([^"]+)"', detail_html, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1)
+    m = re.search(r'href="[^"]*[?&]s=([^"&]+)', detail_html, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1)
+    return None
+
+def parse_channel_lines(channels_html: str) -> list[str]:
+    lines = []
+    for row_html in re.findall(r"<tr[^>]*>(.*?)</tr>", channels_html, flags=re.IGNORECASE | re.DOTALL):
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
+        if len(tds) < 3:
+            continue
+        name = _strip_html(tds[1])
+        play_url = _strip_html(tds[2])
+        if not name or not play_url:
+            continue
+        m = re.search(r"/(udp|rtp|igmp)/(\d+\.\d+\.\d+\.\d+:\d+)", play_url, flags=re.IGNORECASE)
+        if not m:
+            continue
+        lines.append(f"{name},{m.group(1).lower()}/{m.group(2)}")
+    return lines
+
+def fetch_channel_lines_by_province(province: str):
+    rows = fetch_region_rows_by_ajax(province, limit=20)
+    if not rows:
+        return [], "list_empty"
+    picked = None
+    for row in rows:
+        if "新上线" in row.get("status", ""):
+            picked = row
+            break
+    if not picked:
+        for row in rows:
+            if "存活" in row.get("status", ""):
+                picked = row
+                break
+    if not picked:
+        return [], "no_new_or_alive"
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        }
+    )
+    home_resp = session.get(MULTICAST_SOURCE_URL, timeout=15)
+    home_resp.raise_for_status()
+    ajax_cfg = _extract_ajax_config(home_resp.text)
+    if not ajax_cfg:
+        return [], "ajax_cfg_missing"
+    token_plain = ajax_cfg.get("token", "")
+
+    detail_payload = {
+        "action": "multicast_iptv_ajax",
+        "action_type": "detail",
+        "p": picked.get("p_token", ""),
+        "nonce": ajax_cfg.get("nonce", ""),
+        "token": _encrypt_token(token_plain),
+    }
+    detail_resp = session.post(ajax_cfg.get("ajaxUrl", ""), data=detail_payload, timeout=15)
+    detail_resp.raise_for_status()
+    detail_json = detail_resp.json()
+    detail_html = detail_json.get("data", {}).get("html", "")
+    if not detail_html:
+        return [], "detail_empty"
+    token_plain = detail_json.get("data", {}).get("new_token", token_plain)
+
+    s_token = parse_s_token(detail_html)
+    if not s_token:
+        return [], "s_token_missing"
+
+    channels_payload = {
+        "action": "multicast_iptv_ajax",
+        "action_type": "channels",
+        "s": s_token,
+        "nonce": ajax_cfg.get("nonce", ""),
+        "token": _encrypt_token(token_plain),
+    }
+    channels_resp = session.post(ajax_cfg.get("ajaxUrl", ""), data=channels_payload, timeout=15)
+    channels_resp.raise_for_status()
+    channels_json = channels_resp.json()
+    channels_html = channels_json.get("data", {}).get("html", "")
+    if not channels_html:
+        return [], "channels_empty"
+
+    lines = parse_channel_lines(channels_html)
+    if not lines:
+        return [], "channel_lines_empty"
+    return lines, "ok"
+
 
 def extract_test_targets(template_content, max_targets=5):
     """从模板中提取最多 N 个组播测试目标。"""
@@ -225,7 +327,6 @@ def process_province(template_filename, template_dir, txt_output_dir, m3u_output
     province = extract_province(template_filename)
     if not province: return
 
-    template_path = os.path.join(template_dir, template_filename)
     out_txt = os.path.join(txt_output_dir, template_filename)
     out_m3u = os.path.join(m3u_output_dir, template_filename.replace('.txt', '.m3u'))
     group_title = os.path.splitext(template_filename)[0]
@@ -233,53 +334,19 @@ def process_province(template_filename, template_dir, txt_output_dir, m3u_output
     # 1. 检测已有文件
     if check_and_clear_existing(out_txt, out_m3u): return
 
-    # 2. 读取母版内容
-    with open(template_path, 'r', encoding='utf-8') as f:
-        template_content = f.read()
-    
-    # 动态提取前5个组播靶标，避免单个频道停播导致误判
-    targets = extract_test_targets(template_content, max_targets=5)
-    if not targets:
+    # 2. 直接从频道列表提取 频道名+播放地址
+    channel_lines, status = fetch_channel_lines_by_province(province)
+    if not channel_lines:
+        print(f"[-] [{province}] 频道提取失败: {status}")
         return
-    print(f"[*] 成功提取 [{province}] 测试靶标数量: {len(targets)}")
+    txt_content = "\n".join(channel_lines)
 
-    # 3. 获取网站资产并按状态筛选
-    region_all, assets = get_region_assets(province, source_rows)
-    print(f"[*] [{province}] 地区共提取到 {len(region_all)} 条服务器。")
-    if not assets:
-        return
-    # 候选服务器去重（最多5条），不做测流，直接用于导出
-    candidate_hosts, seen_root_domains = [], set()
-    for item in assets:
-        host = item.get("host")
-        if not host:
-            continue
-        pure_domain = host.split(':')[0]
-        root_domain = get_root_domain(pure_domain)
-        if root_domain in seen_root_domains:
-            continue
-        seen_root_domains.add(root_domain)
-        candidate_hosts.append(host)
-        if len(candidate_hosts) >= 5:
-            break
-
-    if not candidate_hosts:
-        print(f"[-] [{province}] 没有可导出的候选服务器。")
-        return
-    print(f"[*] [{province}] 已选候选服务器数量: {len(candidate_hosts)}（跳过测流）")
-
-    # 5. 克隆母版生成纯净文件
-    if candidate_hosts:
-        pattern = re.compile(r'(?:https?://[^/,]+/)?(udp|rtp|igmp)(?:/|://)(\d+\.\d+\.\d+\.\d+:\d+)', re.IGNORECASE)
-        with open(out_txt, 'w', encoding='utf-8') as f_txt, open(out_m3u, 'w', encoding='utf-8') as f_m3u:
-            f_m3u.write(f'#EXTM3U x-tvg-url="{EPG_URL}"\n')
-            for host in candidate_hosts:
-                new_txt_block = pattern.sub(f'http://{host}/\\1/\\2', template_content)
-                f_txt.write(new_txt_block + "\n\n")
-                f_m3u.write(txt_to_m3u_format(new_txt_block, group_title) + "\n\n")
-        print(f"[+] 完美！[{province}] 更新完成，导出 {len(candidate_hosts)} 个规则节点。")
-    else:
-        print(f"[-] [{province}] 本次无可导出节点。")
+    # 3. 直接生成 txt/m3u（一步到位）
+    with open(out_txt, 'w', encoding='utf-8') as f_txt, open(out_m3u, 'w', encoding='utf-8') as f_m3u:
+        f_txt.write(txt_content + "\n")
+        f_m3u.write(f'#EXTM3U x-tvg-url="{EPG_URL}"\n')
+        f_m3u.write(txt_to_m3u_format(txt_content, group_title) + "\n")
+    print(f"[+] 完美！[{province}] 更新完成，导出 {len(channel_lines)} 条频道。")
 
 def push_to_github(files):
     """
@@ -366,13 +433,10 @@ def main():
     m3u_output_dir = os.path.join(repo_root, "m3u")
 
     if args.test_region:
-        region_all, preferred = get_region_assets(args.test_region)
-        print(f"\n[*] 测试结果: 地区={args.test_region}，提取总数={len(region_all)}，可用候选数={len(preferred)}")
-        for row in region_all:
-            print(f"  - {row['host']} | {row['type']} | {row['status']}")
-        if preferred:
-            chosen = preferred[0]
-            print(f"[*] 最终选中: {chosen['host']} | {chosen['status']}")
+        channel_lines, status = fetch_channel_lines_by_province(args.test_region)
+        print(f"\n[*] 测试结果: 地区={args.test_region}，状态={status}，频道数={len(channel_lines)}")
+        for line in channel_lines[:10]:
+            print(f"  - {line}")
         return
 
     if not os.path.exists(template_dir):
