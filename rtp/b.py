@@ -234,6 +234,36 @@ def normalize_group_title(raw_type: str, province: str) -> str:
             return f"{province}{carrier}"
     return province
 
+
+def parse_operator_name(detail_html: str, province: str) -> str:
+    """优先从详情页“运营商”字段提取文件名，如：湖北电信。"""
+    carriers = ("电信", "联通", "移动", "广电")
+    # 先在“运营商”附近做精确提取（兼容 th/td 或 div 结构）
+    m = re.search(
+        r"运营商[\s\S]{0,120}?(" + re.escape(province) + r"(?:电信|联通|移动|广电))",
+        detail_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        value = _strip_html(m.group(1))
+        if value:
+            return value
+    # 次级匹配：不限定“运营商”字样，直接在详情中找“省份+运营商”
+    m = re.search(
+        r"(" + re.escape(province) + r"(?:电信|联通|移动|广电))",
+        detail_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        value = _strip_html(m.group(1))
+        if value:
+            return value
+    # 最后兜底：匹配任意运营商后缀
+    for carrier in carriers:
+        if carrier in detail_html:
+            return f"{province}{carrier}"
+    return province
+
 def fetch_channel_lines_by_province(province: str):
     rows = fetch_region_rows_by_ajax(province, limit=20)
     if not rows:
@@ -304,7 +334,9 @@ def fetch_channel_lines_by_province(province: str):
     lines = parse_channel_lines(channels_html)
     if not lines:
         return [], "channel_lines_empty", province
-    return lines, "ok", normalize_group_title(picked.get("type", province), province)
+    operator_name = parse_operator_name(detail_html, province)
+    group_title = operator_name or normalize_group_title(picked.get("type", province), province)
+    return lines, "ok", group_title
 
 
 def extract_test_targets(template_content, max_targets=5):

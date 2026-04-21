@@ -51,12 +51,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Rebase first to avoid replaying a local bot commit over newer remote changes.
+          git pull --rebase origin main || true
           # Stage additions/modifications/deletions under outputs.
           git add -A -- txt m3u || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
             git commit -m "chore: auto update rtp sources"
-            git pull --rebase origin main
             git push
           fi
