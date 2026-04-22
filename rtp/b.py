@@ -74,6 +74,18 @@ def _strip_html(raw):
     return unescape(no_tags).replace("\xa0", " ").strip()
 
 
+def _parse_site_datetime(value: str) -> datetime | None:
+    s = (value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _encrypt_token(raw_token):
     key = b"cQshuShu88888888"
     cipher = AES.new(key, AES.MODE_ECB)
@@ -123,6 +135,8 @@ def _parse_rows_from_html_fragment(fragment_html):
             "p_token": ip_match.group(1).strip(),
             "host": ip_match.group(2).strip(),
             "type": _strip_html(tds[2]),
+            "online_time": _strip_html(tds[3]),
+            "update_time": _strip_html(tds[4]),
             "status": _strip_html(tds[5]),
         })
     return result
@@ -295,23 +309,55 @@ def parse_operator_name(detail_html: str, province: str) -> str:
             return f"{province}{carrier}"
     return province
 
-def fetch_channel_lines_by_province(province: str, max_per_carrier: int = 5, max_pages: int = 30):
+def fetch_channel_lines_by_province(
+    province: str,
+    max_per_carrier: int = 5,
+    max_pages: int = 30,
+    max_age_hours: int = 24,
+):
     rows = fetch_region_rows_by_ajax(province, limit=20, max_pages=max_pages)
     if not rows:
         return [], "list_empty", province
 
+    now_dt = datetime.now()
+
     def _is_usable_status(status: str) -> bool:
         return ("新上线" in status) or ("存活" in status)
 
+    def _is_recent_update(row: dict) -> bool:
+        dt = _parse_site_datetime(row.get("update_time", ""))
+        if not dt:
+            # 更新时间缺失时降级看上线时间；都缺失则判定为不新鲜
+            dt = _parse_site_datetime(row.get("online_time", ""))
+        if not dt:
+            return False
+        age_hours = (now_dt - dt).total_seconds() / 3600
+        return age_hours <= max_age_hours
+
+    def _status_rank(status: str) -> int:
+        # 新上线优先于存活
+        return 2 if "新上线" in status else 1
+
     def _pick_many(rows_pool, carrier: str, limit: int):
-        carrier_rows = [r for r in rows_pool if carrier in r.get("type", "") and _is_usable_status(r.get("status", ""))]
+        carrier_rows = [
+            r
+            for r in rows_pool
+            if carrier in r.get("type", "")
+            and _is_usable_status(r.get("status", ""))
+            and _is_recent_update(r)
+        ]
         if not carrier_rows or limit <= 0:
             return []
-        new_rows = [r for r in carrier_rows if "新上线" in r.get("status", "")]
-        alive_rows = [r for r in carrier_rows if "存活" in r.get("status", "")]
+
+        def _sort_key(row: dict):
+            dt = _parse_site_datetime(row.get("update_time", "")) or _parse_site_datetime(row.get("online_time", ""))
+            ts = dt.timestamp() if dt else 0.0
+            return (_status_rank(row.get("status", "")), ts)
+
+        carrier_rows = sorted(carrier_rows, key=_sort_key, reverse=True)
         picked = []
         seen = set()
-        for row in (new_rows + alive_rows):
+        for row in carrier_rows:
             token = row.get("p_token")
             if not token or token in seen:
                 continue
@@ -334,12 +380,12 @@ def fetch_channel_lines_by_province(province: str, max_per_carrier: int = 5, max
     # 兜底：三网都没有可用源时，至少保留1条“新上线/存活”
     if not selected_rows:
         for row in rows:
-            if _is_usable_status(row.get("status", "")):
+            if _is_usable_status(row.get("status", "")) and _is_recent_update(row):
                 selected_rows = [row]
                 break
 
     if not selected_rows:
-        return [], "no_new_or_alive", province
+        return [], "no_recent_new_or_alive", province
 
     session = requests.Session()
     session.headers.update(
@@ -414,7 +460,10 @@ def fetch_channel_lines_by_province(province: str, max_per_carrier: int = 5, max
         return [], "channel_lines_empty", province
 
     unique_ops = sorted(set(selected_ops))
-    print(f"[*] [{province}] 已提取源数量: {len(selected_rows)}（电信/移动/联通各最多{max_per_carrier}条），来源: {', '.join(unique_ops)}")
+    print(
+        f"[*] [{province}] 已提取源数量: {len(selected_rows)}"
+        f"（电信/移动/联通各最多{max_per_carrier}条，更新时间<= {max_age_hours}小时），来源: {', '.join(unique_ops)}"
+    )
     return group_to_sources, "ok", province
 
 
@@ -555,7 +604,14 @@ def update_readme_file_list(repo_root: str) -> None:
         f.write(content)
     print("[+] README.md 文件列表已自动更新。")
 
-def process_province(province, txt_output_dir, m3u_output_dir, max_pages=30, max_per_carrier=5):
+def process_province(
+    province,
+    txt_output_dir,
+    m3u_output_dir,
+    max_pages=30,
+    max_per_carrier=5,
+    max_age_hours=12,
+):
     """单一省份核心流水线"""
     group_title = province
     out_txt = os.path.join(txt_output_dir, f"{group_title}.txt")
@@ -569,6 +625,7 @@ def process_province(province, txt_output_dir, m3u_output_dir, max_pages=30, max
         province,
         max_pages=max_pages,
         max_per_carrier=max_per_carrier,
+        max_age_hours=max_age_hours,
     )
     if not grouped_sources:
         print(f"[-] [{province}] 频道提取失败: {status}")
@@ -683,6 +740,12 @@ def parse_args():
         default=5,
         help="每个运营商最多选取“新上线/存活”源数量（默认5）。",
     )
+    ap.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=12,
+        help="仅提取最近更新 N 小时内的源（默认12）。",
+    )
     return ap.parse_args()
 
 
@@ -698,6 +761,7 @@ def main():
             args.test_region,
             max_pages=args.max_pages,
             max_per_carrier=args.max_per_carrier,
+            max_age_hours=args.max_age_hours,
         )
         total = (
             sum(len(lines) for sources in grouped_sources.values() for lines in sources)
@@ -730,6 +794,7 @@ def main():
             m3u_output_dir,
             max_pages=args.max_pages,
             max_per_carrier=args.max_per_carrier,
+            max_age_hours=args.max_age_hours,
         )
 
     generated_files = []
