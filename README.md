@@ -1,12 +1,34 @@
-##两款TV端直播播放app 一款win端直播播放器软件
+## 4K-IPTV-M3U
 
-一款纯直播APP [https://github.com/jia070310/lemonTV](https://github.com/jia070310/lemonTV)
+基于组播源的省级直播列表仓库，按省份自动生成 `m3u/txt` 文件，并在 README 中展示可直接使用的加速下载链接。
 
-还有一款是影视播放器和直播APP集合功能版 [https://github.com/jia070310/lomenTV-VDS](https://github.com/jia070310/lomenTV-VDS)（影视播放器类似于网易爆米花 vidhub infuse等播放器）
+### 相关播放器项目
 
-一款pc端直播播放器  [https://github.com/jia070310/lemonIPTV-windows](https://github.com/jia070310/lemonIPTV-windows)
+- 纯直播 APP: [lemonTV](https://github.com/jia070310/lemonTV)
+- 影视+直播集合版: [lomenTV-VDS](https://github.com/jia070310/lomenTV-VDS)
+- Windows 直播播放器: [lemonIPTV-windows](https://github.com/jia070310/lemonIPTV-windows)
 
-![image](https://github.com/jia070310/4K-IPTV-M3U/blob/main/tv.png)
+![预览图](https://github.com/jia070310/4K-IPTV-M3U/blob/main/tv.png)
+
+### 仓库内容
+
+- `rtp/b.py`: 组播源抓取与生成主脚本（支持电信/移动/联通多源提取）
+- `m3u/`: 自动生成的 M3U 文件
+- `txt/`: 自动生成的 TXT 文件
+- `.github/workflows/`: 定时任务与自动更新流程
+
+### 更新机制
+
+- 定时任务执行后自动更新 `m3u`、`txt`
+- 同步自动重写 README 文件列表（含“最近更新时间”）
+- 下载链接统一使用 `gh-proxy` 加速前缀
+
+### 本地运行
+
+```bash
+pip install -r requirements.txt
+python rtp/b.py
+```
 
 ## 加速下载说明
 
